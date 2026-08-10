@@ -1,0 +1,108 @@
+name: QA EKS Node Group — Scheduled Scaling
+
+# Cron times are UTC.
+# Nigeria (WAT) = UTC+1
+#
+# Scale UP   → 5:00 AM UTC  = 6:00 AM WAT
+# Scale DOWN → 5:00 PM UTC  = 6:00 PM WAT
+
+on:
+  schedule:
+    - cron: "0 5 * * *"    # 6:00 AM WAT
+    - cron: "0 17 * * *"   # 6:00 PM WAT
+
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to perform"
+        required: true
+        type: choice
+        options:
+          - scale-up
+          - scale-down
+
+env:
+  AWS_REGION: eu-west-1
+  CLUSTER_NAME: raindrop-qa-eks-cluster
+  NODEGROUP_NAME: raindrop-qa-workers
+
+jobs:
+  scale:
+    name: EKS Node Group Scaling
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      # ─────────────────────────────────────────────
+      # 1. Resolve scaling action
+      # ─────────────────────────────────────────────
+      - name: Resolve scaling action
+        id: resolve
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ACTION="${{ github.event.inputs.action }}"
+          elif [[ "${{ github.event.schedule }}" == "0 5 * * *" ]]; then
+            ACTION="scale-up"
+          else
+            ACTION="scale-down"
+          fi
+          echo "action=${ACTION}" >> "$GITHUB_OUTPUT"
+          if [[ "${ACTION}" == "scale-up" ]]; then
+            echo "desired_size=3" >> "$GITHUB_OUTPUT"
+            echo "min_size=2" >> "$GITHUB_OUTPUT"
+          else
+            echo "desired_size=0" >> "$GITHUB_OUTPUT"
+            echo "min_size=0" >> "$GITHUB_OUTPUT"
+          fi
+          echo "================================="
+          echo "Scaling action: ${ACTION}"
+          echo "================================="
+      # ─────────────────────────────────────────────
+      # 2. Authenticate to AWS using OIDC
+      # ─────────────────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ─────────────────────────────────────────────
+      # 3. Scale EKS node group
+      # ─────────────────────────────────────────────
+      - name: Scale EKS node group
+        shell: bash
+        run: |
+          echo "Action: ${{ steps.resolve.outputs.action }}"
+          echo "Min size: ${{ steps.resolve.outputs.min_size }}"
+          echo "Desired size: ${{ steps.resolve.outputs.desired_size }}"
+          echo "Max size: 4"
+          aws eks update-nodegroup-config \
+            --cluster-name "$CLUSTER_NAME" \
+            --nodegroup-name "$NODEGROUP_NAME" \
+            --scaling-config "minSize=${{ steps.resolve.outputs.min_size }},maxSize=4,desiredSize=${{ steps.resolve.outputs.desired_size }}"
+      # ─────────────────────────────────────────────
+      # 4. Wait for update to complete
+      # ─────────────────────────────────────────────
+      - name: Wait for node group update
+        shell: bash
+        run: |
+          aws eks wait nodegroup-active \
+            --cluster-name "$CLUSTER_NAME" \
+            --nodegroup-name "$NODEGROUP_NAME"
+      # ─────────────────────────────────────────────
+      # 5. Verify final state
+      # ─────────────────────────────────────────────
+      - name: Verify node group scaling
+        shell: bash
+        run: |
+          echo "Final node group configuration:"
+          aws eks describe-nodegroup \
+            --cluster-name "$CLUSTER_NAME" \
+            --nodegroup-name "$NODEGROUP_NAME" \
+            --query "nodegroup.scalingConfig" \
+            --output table
