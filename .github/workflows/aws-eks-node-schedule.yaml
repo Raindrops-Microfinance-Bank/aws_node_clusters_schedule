@@ -1,15 +1,19 @@
 name: QA EKS Node Group — Scheduled Scaling
 
-# Cron times are UTC.
-# Nigeria (WAT) = UTC+1
-#
-# Scale UP   → 5:00 AM UTC  = 6:00 AM WAT
-# Scale DOWN → 5:00 PM UTC  = 6:00 PM WAT
 
 on:
   schedule:
-    - cron: "0 5 * * *"    # 6:00 AM WAT
-    - cron: "0 17 * * *"   # 6:00 PM WAT
+    # 09:07 AM WAT → Scale UP 
+    - cron: "7 8 * * *"
+
+    # 02:07 PM WAT → Scale DOWN
+    - cron: "7 13 * * *"
+
+    # 08:07 PM WAT → Scale UP
+    - cron: "7 19 * * *"
+
+    # 01:07 AM WAT → Scale DOWN
+    - cron: "7 0 * * *"
 
   workflow_dispatch:
     inputs:
@@ -21,10 +25,16 @@ on:
           - scale-up
           - scale-down
 
+# Prevent overlapping EKS scaling operations.
+concurrency:
+  group: qa-eks-nodegroup-scaling
+  cancel-in-progress: false
+
 env:
   AWS_REGION: eu-west-1
   CLUSTER_NAME: raindrop-qa-eks-cluster
   NODEGROUP_NAME: raindrop-qa-workers
+  MAX_SIZE: 4
 
 jobs:
   scale:
@@ -37,95 +47,247 @@ jobs:
 
     steps:
 
-      # ─────────────────────────────────────────────
+      # ==========================================================
       # 1. Resolve scaling action
-      # ─────────────────────────────────────────────
+      # ==========================================================
       - name: Resolve scaling action
         id: resolve
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          set -euo pipefail
+
+          EVENT_NAME="${{ github.event_name }}"
+          SCHEDULE="${{ github.event.schedule }}"
+
+          echo "=============================================="
+          echo "Resolving scaling action"
+          echo "=============================================="
+          echo "Event:    ${EVENT_NAME}"
+          echo "Schedule: ${SCHEDULE:-manual}"
+          echo "=============================================="
+
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+
             ACTION="${{ github.event.inputs.action }}"
-          elif [[ "${{ github.event.schedule }}" == "0 5 * * *" ]]; then
+
+          elif [[ "${SCHEDULE}" == "7 8 * * *" ]]; then
+
+            # 09:07 WAT
             ACTION="scale-up"
-          else
+
+          elif [[ "${SCHEDULE}" == "7 13 * * *" ]]; then
+
+            # 14:07 WAT
             ACTION="scale-down"
-          fi
-          echo "action=${ACTION}" >> "$GITHUB_OUTPUT"
-          if [[ "${ACTION}" == "scale-up" ]]; then
-            echo "desired_size=3" >> "$GITHUB_OUTPUT"
-            echo "min_size=2" >> "$GITHUB_OUTPUT"
+
+          elif [[ "${SCHEDULE}" == "7 19 * * *" ]]; then
+
+            # 20:07 WAT
+            ACTION="scale-up"
+
+          elif [[ "${SCHEDULE}" == "7 0 * * *" ]]; then
+
+            # 01:07 WAT
+            ACTION="scale-down"
+
           else
-            echo "desired_size=0" >> "$GITHUB_OUTPUT"
-            echo "min_size=0" >> "$GITHUB_OUTPUT"
+
+            echo "ERROR: Unknown schedule: ${SCHEDULE}"
+            exit 1
+
           fi
-          echo "================================="
-          echo "Scaling action: ${ACTION}"
-          echo "================================="
 
+          # ------------------------------------------------------
+          # Set scaling configuration
+          # ------------------------------------------------------
 
-      - name: Debug OIDC token
-        env:
-          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+          if [[ "${ACTION}" == "scale-up" ]]; then
+
+            DESIRED_SIZE=3
+            MIN_SIZE=2
+
+          elif [[ "${ACTION}" == "scale-down" ]]; then
+
+            DESIRED_SIZE=0
+            MIN_SIZE=0
+
+          else
+
+            echo "ERROR: Invalid action: ${ACTION}"
+            exit 1
+
+          fi
+
+          echo "action=${ACTION}" >> "$GITHUB_OUTPUT"
+          echo "desired_size=${DESIRED_SIZE}" >> "$GITHUB_OUTPUT"
+          echo "min_size=${MIN_SIZE}" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "=============================================="
+          echo "Scaling Configuration"
+          echo "=============================================="
+          echo "Action:        ${ACTION}"
+          echo "Min size:      ${MIN_SIZE}"
+          echo "Desired size:  ${DESIRED_SIZE}"
+          echo "Max size:      ${MAX_SIZE}"
+          echo "=============================================="
+
+      # ==========================================================
+      # 2. Debug workflow trigger
+      # ==========================================================
+      - name: Debug workflow trigger
+        shell: bash
         run: |
-          echo "Repository: ${{ github.repository }}"
-          echo "Ref: ${{ github.ref }}"
-          echo "Event: ${{ github.event_name }}"
-      
-          TOKEN=$(curl -sSf \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
-            | jq -r '.value')
-      
-          echo "$TOKEN" | cut -d '.' -f2 | base64 -d 2>/dev/null | jq .
-    
+          echo "=============================================="
+          echo "GitHub Actions Trigger Information"
+          echo "=============================================="
+          echo "Repository:  ${{ github.repository }}"
+          echo "Workflow:    ${{ github.workflow }}"
+          echo "Event:       ${{ github.event_name }}"
+          echo "Schedule:    ${{ github.event.schedule }}"
+          echo "Ref:         ${{ github.ref }}"
+          echo "SHA:         ${{ github.sha }}"
+          echo "Run ID:      ${{ github.run_id }}"
+          echo "Actor:       ${{ github.actor }}"
+          echo "=============================================="
+
+      # ==========================================================
+      # 3. Configure AWS credentials using GitHub OIDC
+      # ==========================================================
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::511454338893:role/OIDC-RAINDROP-IAC
           aws-region: ${{ env.AWS_REGION }}
-      # ─────────────────────────────────────────────
-      # 2. Authenticate to AWS using OIDC
-      # ─────────────────────────────────────────────
-      # - name: Configure AWS credentials
-      #   uses: aws-actions/configure-aws-credentials@v4
-      #   with:
-      #     role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-      #     aws-region: ${{ env.AWS_REGION }}
 
-      # ─────────────────────────────────────────────
-      # 3. Scale EKS node group
-      # ─────────────────────────────────────────────
-      - name: Scale EKS node group
+      # ==========================================================
+      # 4. Verify AWS identity
+      # ==========================================================
+      - name: Verify AWS credentials
         shell: bash
         run: |
-          echo "Action: ${{ steps.resolve.outputs.action }}"
-          echo "Min size: ${{ steps.resolve.outputs.min_size }}"
-          echo "Desired size: ${{ steps.resolve.outputs.desired_size }}"
-          echo "Max size: 4"
-          aws eks update-nodegroup-config \
-            --cluster-name "$CLUSTER_NAME" \
-            --nodegroup-name "$NODEGROUP_NAME" \
-            --scaling-config "minSize=${{ steps.resolve.outputs.min_size }},maxSize=4,desiredSize=${{ steps.resolve.outputs.desired_size }}"
-      # ─────────────────────────────────────────────
-      # 4. Wait for update to complete
-      # ─────────────────────────────────────────────
-      - name: Wait for node group update
+          set -euo pipefail
+
+          echo "Verifying AWS identity..."
+
+          aws sts get-caller-identity
+
+      # ==========================================================
+      # 5. Verify EKS node group exists
+      # ==========================================================
+      - name: Verify EKS node group
         shell: bash
         run: |
-          aws eks wait nodegroup-active \
-            --cluster-name "$CLUSTER_NAME" \
-            --nodegroup-name "$NODEGROUP_NAME"
-      # ─────────────────────────────────────────────
-      # 5. Verify final state
-      # ─────────────────────────────────────────────
-      - name: Verify node group scaling
-        shell: bash
-        run: |
-          echo "Final node group configuration:"
+          set -euo pipefail
+
+          echo "Checking EKS node group..."
+
           aws eks describe-nodegroup \
             --cluster-name "$CLUSTER_NAME" \
             --nodegroup-name "$NODEGROUP_NAME" \
-            --query "nodegroup.scalingConfig" \
+            --query 'nodegroup.{Status:status,Min:minSize,Desired:desiredSize,Max:maxSize}' \
             --output table
+
+      # ==========================================================
+      # 6. Scale EKS node group
+      # ==========================================================
+      - name: Scale EKS node group
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ACTION="${{ steps.resolve.outputs.action }}"
+          MIN_SIZE="${{ steps.resolve.outputs.min_size }}"
+          DESIRED_SIZE="${{ steps.resolve.outputs.desired_size }}"
+
+          echo "=============================================="
+          echo "Updating EKS Node Group"
+          echo "=============================================="
+          echo "Action:        ${ACTION}"
+          echo "Min size:      ${MIN_SIZE}"
+          echo "Desired size:  ${DESIRED_SIZE}"
+          echo "Max size:      ${MAX_SIZE}"
+          echo "=============================================="
+
+          aws eks update-nodegroup-config \
+            --cluster-name "$CLUSTER_NAME" \
+            --nodegroup-name "$NODEGROUP_NAME" \
+            --scaling-config "minSize=${MIN_SIZE},maxSize=${MAX_SIZE},desiredSize=${DESIRED_SIZE}"
+
+      # ==========================================================
+      # 7. Wait for EKS update
+      # ==========================================================
+      - name: Wait for node group update
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Waiting for EKS node group to become ACTIVE..."
+
+          aws eks wait nodegroup-active \
+            --cluster-name "$CLUSTER_NAME" \
+            --nodegroup-name "$NODEGROUP_NAME"
+
+          echo "EKS node group is ACTIVE."
+
+      # ==========================================================
+      # 8. Verify final configuration
+      # ==========================================================
+      - name: Verify final node group scaling
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=============================================="
+          echo "Final EKS Node Group Configuration"
+          echo "=============================================="
+
+          aws eks describe-nodegroup \
+            --cluster-name "$CLUSTER_NAME" \
+            --nodegroup-name "$NODEGROUP_NAME" \
+            --query 'nodegroup.{Status:status,Min:minSize,Desired:desiredSize,Max:maxSize}' \
+            --output table
+
+      # ==========================================================
+      # 9. Validate expected state
+      # ==========================================================
+      - name: Validate scaling result
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED_MIN="${{ steps.resolve.outputs.min_size }}"
+          EXPECTED_DESIRED="${{ steps.resolve.outputs.desired_size }}"
+
+          ACTUAL_MIN=$(aws eks describe-nodegroup \
+            --cluster-name "$CLUSTER_NAME" \
+            --nodegroup-name "$NODEGROUP_NAME" \
+            --query 'nodegroup.scalingConfig.minSize' \
+            --output text)
+
+          ACTUAL_DESIRED=$(aws eks describe-nodegroup \
+            --cluster-name "$CLUSTER_NAME" \
+            --nodegroup-name "$NODEGROUP_NAME" \
+            --query 'nodegroup.scalingConfig.desiredSize' \
+            --output text)
+
+          echo "Expected min size:     ${EXPECTED_MIN}"
+          echo "Actual min size:       ${ACTUAL_MIN}"
+          echo ""
+          echo "Expected desired size: ${EXPECTED_DESIRED}"
+          echo "Actual desired size:   ${ACTUAL_DESIRED}"
+
+          if [[ "${ACTUAL_MIN}" != "${EXPECTED_MIN}" ]]; then
+            echo "ERROR: Minimum size does not match expected value."
+            exit 1
+          fi
+
+          if [[ "${ACTUAL_DESIRED}" != "${EXPECTED_DESIRED}" ]]; then
+            echo "ERROR: Desired size does not match expected value."
+            exit 1
+          fi
+
+          echo ""
+          echo "=============================================="
+          echo "Scaling completed successfully."
+          echo "=============================================="
