@@ -2,18 +2,18 @@ name: QA EKS Node Group — Scheduled Scaling
 
 
 on:
-  schedule:
-    # 09:07 AM WAT → Scale UP 
-    - cron: "7 8 * * *"
-
-    # 02:07 PM WAT → Scale DOWN
-    - cron: "7 13 * * *"
-
-    # 08:07 PM WAT → Scale UP
-    - cron: "7 19 * * *"
-
-    # 01:07 AM WAT → Scale DOWN
-    - cron: "7 0 * * *"
+  # schedule:
+  #   # 09:07 AM WAT → Scale UP
+  #   - cron: "7 8 * * *"
+  #
+  #   # 02:07 PM WAT → Scale DOWN
+  #   - cron: "7 13 * * *"
+  #
+  #   # 08:07 PM WAT → Scale UP
+  #   - cron: "7 19 * * *"
+  #
+  #   # 01:07 AM WAT → Scale DOWN
+  #   - cron: "7 0 * * *"
 
   workflow_dispatch:
     inputs:
